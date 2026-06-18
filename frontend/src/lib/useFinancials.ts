@@ -14,6 +14,8 @@ export function useFinancialStatus() {
     queryKey: FINANCIAL_QK.status,
     queryFn: () => api.financialStatus(),
     staleTime: 60_000,
+    // 同步进行中时每 3s 轮询,及时反映表数变化与同步完成;空闲时不轮询。
+    refetchInterval: (query) => (query.state.data?.syncing ? 3_000 : false),
   })
 }
 
@@ -21,6 +23,33 @@ export function useFinancialMetrics(symbol?: string) {
   return useQuery({
     queryKey: FINANCIAL_QK.metrics(symbol),
     queryFn: () => api.financialMetrics(symbol),
+    enabled: !!symbol,
+    staleTime: 300_000,
+  })
+}
+
+export function useFinancialIncome(symbol?: string) {
+  return useQuery({
+    queryKey: FINANCIAL_QK.income(symbol),
+    queryFn: () => api.financialIncome(symbol),
+    enabled: !!symbol,
+    staleTime: 300_000,
+  })
+}
+
+export function useFinancialBalanceSheet(symbol?: string) {
+  return useQuery({
+    queryKey: FINANCIAL_QK.balanceSheet(symbol),
+    queryFn: () => api.financialBalanceSheet(symbol),
+    enabled: !!symbol,
+    staleTime: 300_000,
+  })
+}
+
+export function useFinancialCashFlow(symbol?: string) {
+  return useQuery({
+    queryKey: FINANCIAL_QK.cashFlow(symbol),
+    queryFn: () => api.financialCashFlow(symbol),
     enabled: !!symbol,
     staleTime: 300_000,
   })

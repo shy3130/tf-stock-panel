@@ -13,3 +13,18 @@ export const CAP_LABELS: Record<string, { name: string; hint: string }> = {
   'financial':               { name: '财务数据',          hint: '利润表 / 资负表 / 现金流 / 关键指标' },
   'adj_factor':              { name: '复权因子',          hint: '让 MA/MACD 等指标在分红送转日不失真' },
 }
+
+// 套餐等级 —— 用于按档位门控功能(如专线端点 / 按月扩展分钟K)。
+// 基础档提取与后端 quote_service.py 一致:取 label 第一个词("Pro +" → "pro")。
+export const TIER_RANK: Record<string, number> = { free: 0, starter: 1, pro: 2, expert: 3 }
+export const EXPERT_RANK = TIER_RANK.expert
+
+export function tierRank(label: string): number {
+  const base = (label.split(' ')[0] ?? '').split('+')[0].trim().toLowerCase()
+  return TIER_RANK[base] ?? -1
+}
+
+export function isExpertOrAbove(label: string): boolean {
+  return tierRank(label) >= EXPERT_RANK
+}
+

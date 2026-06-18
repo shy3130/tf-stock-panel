@@ -197,6 +197,8 @@ class FinancialScheduler:
         self._capset: CapabilitySet | None = None
         self._lock = threading.Lock()
         self._last_sync: dict[str, str] = {}  # {table: iso_timestamp}
+        # 手动同步(run_now)是否正在进行。前端据此显示"同步中"并防重复点击。
+        self._is_syncing = False
 
     def start(self, data_dir: Path, capset: CapabilitySet) -> None:
         if not capset.has(Cap.FINANCIAL):
@@ -242,27 +244,46 @@ class FinancialScheduler:
             pass
 
     def run_now(self, table: str | None = None) -> dict[str, int]:
-        """手动触发同步。table=None 同步全部。"""
+        """手动触发同步。table=None 同步全部。
+
+        用 _is_syncing 标志防并发:若已有同步在进行,本次直接跳过,
+        避免重复请求拖慢服务端 / 触发上游限流。
+        """
         if not self._capset or not self._capset.has(Cap.FINANCIAL):
             return {}
-        if table:
-            fn = {
-                "metrics": sync_metrics,
-                "income": sync_income,
-                "balance_sheet": sync_balance_sheet,
-                "cash_flow": sync_cash_flow,
-            }.get(table)
-            if not fn:
-                return {}
-            rows = fn(self._data_dir, self._capset)
-            self._last_sync[table] = datetime.now(timezone.utc).isoformat()
-            return {table: rows}
-        else:
-            result = sync_all(self._data_dir, self._capset)
-            now = datetime.now(timezone.utc).isoformat()
-            for t in result:
-                self._last_sync[t] = now
-            return result
+        with self._lock:
+            if self._is_syncing:
+                logger.info("financial sync skipped: already running")
+                return {"_skipped": 1}
+            self._is_syncing = True
+        try:
+            if table:
+                fn = {
+                    "metrics": sync_metrics,
+                    "income": sync_income,
+                    "balance_sheet": sync_balance_sheet,
+                    "cash_flow": sync_cash_flow,
+                }.get(table)
+                if not fn:
+                    return {}
+                rows = fn(self._data_dir, self._capset)
+                self._last_sync[table] = datetime.now(timezone.utc).isoformat()
+                return {table: rows}
+            else:
+                result = sync_all(self._data_dir, self._capset)
+                now = datetime.now(timezone.utc).isoformat()
+                for t in result:
+                    self._last_sync[t] = now
+                return result
+        finally:
+            with self._lock:
+                self._is_syncing = False
+
+    @property
+    def is_syncing(self) -> bool:
+        """手动同步是否正在进行(供 /status 返回,前端据此显示"同步中")。"""
+        with self._lock:
+            return self._is_syncing
 
     @property
     def last_sync(self) -> dict[str, str]:

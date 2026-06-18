@@ -638,7 +638,10 @@ export function StrategyBacktest() {
   const [scoringDraft, setScoringDraft] = useState<Record<string, number>>({})
   const [strategyParams, setStrategyParams] = useState<Record<string, any>>(saved?.params ?? {})
   const [overrides, setOverrides] = useState<Record<string, any>>(saved?.overrides ?? {})
-  const [result, setResult] = useState<StrategyBacktestResult | null>(saved?.result ?? null)
+  // result 不从 localStorage 恢复:它是运行产物(净值/交易),大且易过时,
+  // 跨会话/拉新代码后自动渲染一个可能对应已失效策略的旧结果会造成困惑
+  // (切页不卸载组件,内存中的 result 仍保留,无需靠 localStorage 恢复)。
+  const [result, setResult] = useState<StrategyBacktestResult | null>(null)
   const [resultTab, setResultTab] = useState<'daily' | 'trades' | 'picks'>('daily')
   const [dailyPage, setDailyPage] = useState(0)
   const [tradePage, setTradePage] = useState(0)
@@ -655,6 +658,20 @@ export function StrategyBacktest() {
   const filteredStrategyList = useMemo(() => (
     strategyGroup === 'all' ? strategyList : strategyList.filter(st => st.source === strategyGroup)
   ), [strategyGroup, strategyList])
+
+  // 校验 localStorage 里保存的上次选中策略是否仍存在(本地开发残留的自定义策略
+  // 拉新代码后会失效,导致 strategyGet 一直 404/加载中)。列表就绪后若失效,
+  // 连带清除其专属的 params/overrides/result(这些是该策略的运行配置/产物,
+  // 策略失效后留着会造成"孤儿"状态:界面显示旧回测结果却无对应策略)。
+  useEffect(() => {
+    if (strategies.isLoading || strategyList.length === 0) return
+    if (selectedStrategy && !strategyList.some(st => st.id === selectedStrategy)) {
+      setSelectedStrategy(null)
+      setStrategyParams({})
+      setOverrides({})
+      setResult(null)
+    }
+  }, [strategies.isLoading, strategyList, selectedStrategy])
 
   const strategyDetail = useQuery({
     queryKey: ['strategy-detail', selectedStrategy],

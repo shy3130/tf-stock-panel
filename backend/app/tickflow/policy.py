@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from pathlib import Path
 from typing import Any
 
@@ -52,6 +53,50 @@ def _tier_to_capset(tier_def: dict[str, dict[str, Any]]) -> CapabilitySet:
     return CapabilitySet(caps)
 
 
+def _is_transient(e: Exception) -> bool:
+    """是否为"可重试的瞬时错误"——网络抖动 / 限流 / 服务端 5xx。
+
+    与权限/参数错误(403/401/400/404)区分:后者重试也无用,不重试。
+    用类名匹配而非 import SDK 异常,避免探测期对 SDK 内部耦合。
+    """
+    cls = e.__class__.__name__
+    if cls in {
+        "RateLimitError", "InternalServerError", "APIError",
+        "ConnectionError", "TimeoutError", "ConnectError",
+        "ConnectTimeout", "ReadTimeout", "RemoteProtocolError",
+        "httpx.ConnectError", "httpx.TimeoutException",
+    }:
+        return True
+    # APIError 体系下,status_code 5xx/429 视为瞬时
+    status = getattr(e, "status_code", None)
+    if isinstance(status, int) and (status == 429 or status >= 500):
+        return True
+    return False
+
+
+def _call_with_retry(fn, attempts: int = 3, backoff: float = 0.6) -> None:
+    """调用 fn();对瞬时错误退避重试,权限/参数错误立即抛出。
+
+    attempts=总尝试次数(含首次)。返回 None,异常由调用方分类。
+    """
+    last_exc: Exception | None = None
+    for i in range(attempts):
+        try:
+            fn()
+            return
+        except Exception as e:  # noqa: BLE001
+            last_exc = e
+            # 权限/参数类错误:重试无意义,立即抛出交给 try_call 归类
+            if not _is_transient(e):
+                raise
+            # 瞬时错误:最后一轮不再 sleep
+            if i < attempts - 1:
+                time.sleep(backoff * (i + 1))
+    # 重试耗尽,抛出最后一次异常
+    assert last_exc is not None
+    raise last_exc
+
+
 def _probe_real(tiers: dict) -> tuple[CapabilitySet, list[str]]:
     """逐 capability 试探。需要 API key。
 
@@ -65,7 +110,7 @@ def _probe_real(tiers: dict) -> tuple[CapabilitySet, list[str]]:
 
     def try_call(cap: Cap, fn, default_limits: dict[str, Any]) -> None:
         try:
-            fn()
+            _call_with_retry(fn)
             available[cap] = CapabilityLimits(
                 rpm=default_limits.get("rpm"),
                 batch=default_limits.get("batch"),
@@ -85,6 +130,7 @@ def _probe_real(tiers: dict) -> tuple[CapabilitySet, list[str]]:
             if is_perm_denied:
                 log.append(f"✗ {cap}(无权限)")
             else:
+                # 重试耗尽仍失败的瞬时错误 — 标记为疑似,而非直接判定"无此能力"
                 log.append(f"? {cap} ({cls}: {e})")
 
     # 用各档默认上限作为占位(无 X-RateLimit-* 头时)

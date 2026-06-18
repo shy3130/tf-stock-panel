@@ -39,6 +39,8 @@ export interface FinancialStatus {
   available: boolean
   tables: Record<string, { rows: number; symbols: number }>
   last_sync: Record<string, string>
+  /** 服务端是否正在同步(手动触发)——驱动"同步中"UI 并防重复点击 */
+  syncing?: boolean
 }
 
 export interface FinancialMetricRecord {

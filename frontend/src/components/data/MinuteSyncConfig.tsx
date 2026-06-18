@@ -3,6 +3,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Loader2 } from 'lucide-react'
 import { api } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
+import { isExpertOrAbove } from '@/lib/capability-labels'
 
 export function MinuteSyncConfig({ caps, isRunning, onStart }: { caps: { label: string; capabilities: Record<string, { rpm: number | null; batch: number | null; subscribe: number | null }> } | undefined; isRunning: boolean; onStart: () => void }) {
   const qc = useQueryClient()
@@ -88,7 +89,7 @@ export function MinuteSyncConfig({ caps, isRunning, onStart }: { caps: { label: 
 
       <div className="pt-2 border-t border-border space-y-2.5">
         <div className="text-[10px] text-secondary">向前扩展历史数据</div>
-        <MinuteExtendControls hasMinuteCap={hasMinuteCap} isRunning={isRunning} onStart={onStart} />
+        <MinuteExtendControls hasMinuteCap={hasMinuteCap} tierLabel={caps?.label ?? ''} isRunning={isRunning} onStart={onStart} />
       </div>
 
       <div className="text-[10px] text-muted">
@@ -98,8 +99,11 @@ export function MinuteSyncConfig({ caps, isRunning, onStart }: { caps: { label: 
   )
 }
 
-function MinuteExtendControls({ hasMinuteCap, isRunning, onStart }: { hasMinuteCap: boolean; isRunning: boolean; onStart: () => void }) {
+function MinuteExtendControls({ hasMinuteCap, tierLabel, isRunning, onStart }: { hasMinuteCap: boolean; tierLabel: string; isRunning: boolean; onStart: () => void }) {
   const qc = useQueryClient()
+  // 月单位(按月扩展更长的分钟K历史)仅 Expert+ 开放;Pro 仅可用"天"(1~15 天)
+  const canUseMonth = isExpertOrAbove(tierLabel)
+  const [unit, setUnit] = useState<'day' | 'month'>('day')
   const [value, setValue] = useState(5)
   const [confirmOpen, setConfirmOpen] = useState(false)
 
@@ -107,10 +111,12 @@ function MinuteExtendControls({ hasMinuteCap, isRunning, onStart }: { hasMinuteC
     queryKey: QK.dataStatus,
     queryFn: api.dataStatus,
   })
-  const hasMinuteData = !!(dataStatus.data?.minute?.rows)
+  // 判断本地是否已有分钟K数据:后端 _safe_aggregate_minute 为避免全表扫描,
+  // rows 恒为 0,改用 trading_days(分区目录数,真实统计)判断。
+  const hasMinuteData = !!(dataStatus.data?.minute?.trading_days)
 
   const extend = useMutation({
-    mutationFn: () => api.extendMinuteHistory(value, 'day'),
+    mutationFn: () => api.extendMinuteHistory(value, unit),
     onSuccess: () => {
       onStart()
       qc.invalidateQueries({ queryKey: QK.pipelineJobs })
@@ -118,7 +124,8 @@ function MinuteExtendControls({ hasMinuteCap, isRunning, onStart }: { hasMinuteC
     },
   })
 
-  const totalDays = Math.min(value, 15)
+  // 各单位上限:day 15 天,month 6 月(180 天)
+  const maxValue = unit === 'month' ? 6 : 15
 
   const handleFetch = () => {
     if (!hasMinuteData) {
@@ -126,6 +133,14 @@ function MinuteExtendControls({ hasMinuteCap, isRunning, onStart }: { hasMinuteC
     } else {
       extend.mutate()
     }
+  }
+
+  // 切换单位时把 value clamp 到新单位的上限
+  const switchUnit = (u: 'day' | 'month') => {
+    if (u === unit) return
+    setUnit(u)
+    const max = u === 'month' ? 6 : 15
+    setValue(v => Math.min(v, max))
   }
 
   return (
@@ -138,15 +153,30 @@ function MinuteExtendControls({ hasMinuteCap, isRunning, onStart }: { hasMinuteC
             className="h-6 w-6 flex items-center justify-center rounded-l-btn bg-elevated border border-border text-secondary hover:bg-border/50 disabled:opacity-30 transition-colors text-xs"
           >−</button>
           <div className="h-6 w-8 flex items-center justify-center border-y border-border text-[11px] font-mono tabular-nums text-foreground bg-base">
-            {totalDays}
+            {value}
           </div>
           <button
-            onClick={() => setValue(Math.min(15, value + 1))}
-            disabled={!hasMinuteCap || isRunning || extend.isPending || value >= 15}
+            onClick={() => setValue(Math.min(maxValue, value + 1))}
+            disabled={!hasMinuteCap || isRunning || extend.isPending || value >= maxValue}
             className="h-6 w-6 flex items-center justify-center rounded-r-btn bg-elevated border border-border text-secondary hover:bg-border/50 disabled:opacity-30 transition-colors text-xs"
           >+</button>
         </div>
-        <span className="text-[10px] text-muted">天</span>
+
+        {canUseMonth ? (
+          <div className="flex rounded-btn border border-border overflow-hidden">
+            {(['day', 'month'] as const).map(u => (
+              <button
+                key={u}
+                onClick={() => switchUnit(u)}
+                className={`px-2 py-0.5 text-[10px] font-medium transition-colors ${
+                  unit === u ? 'bg-accent/15 text-accent' : 'text-secondary hover:bg-elevated'
+                }`}
+              >{u === 'day' ? '天' : '月'}</button>
+            ))}
+          </div>
+        ) : (
+          <span className="text-[10px] text-muted">天</span>
+        )}
       </div>
 
       <button
@@ -165,7 +195,7 @@ function MinuteExtendControls({ hasMinuteCap, isRunning, onStart }: { hasMinuteC
         <div className="fixed inset-0 z-50 flex items-center justify-center">
           <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" onClick={() => setConfirmOpen(false)} />
           <div className="relative rounded-card border border-border bg-surface shadow-2xl mx-4 px-6 py-5 max-w-sm w-full space-y-4">
-            <div className="text-sm text-foreground text-center">本地暂无分钟K数据，是否立即获取最近 {totalDays} 日分钟K？</div>
+            <div className="text-sm text-foreground text-center">本地暂无分钟K数据，是否立即获取最近 {value} {unit === 'month' ? '月' : '天'}的分钟K？</div>
             <div className="flex items-center justify-center gap-3">
               <button
                 onClick={() => { setConfirmOpen(false); extend.mutate() }}

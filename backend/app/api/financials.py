@@ -41,7 +41,14 @@ def financial_status(request: Request):
     fs = getattr(request.app.state, "financial_scheduler", None)
     last_sync = fs.last_sync if fs else {}
 
-    return {"available": True, "tables": tables, "last_sync": last_sync}
+    return {
+        "available": True,
+        "tables": tables,
+        "last_sync": last_sync,
+        # 服务端是否正在同步(手动触发)——前端据此显示"同步中"并防重复点击,
+        # 且刷新页面后仍能正确反映服务端状态。
+        "syncing": bool(fs and fs.is_syncing),
+    }
 
 
 @router.get("/metrics")

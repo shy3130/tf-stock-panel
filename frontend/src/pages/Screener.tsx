@@ -44,7 +44,7 @@ export function Screener() {
   const [showBuilder, setShowBuilder] = useState(false)
   const [builderMode, setBuilderMode] = useState<'create' | 'modify'>('create')
   const [showStore, setShowStore] = useState(false)
-  const { pool, addToPool, removeFromPool, reorderPool } = useStrategyPool()
+  const { pool, addToPool, removeFromPool, reorderPool, prune } = useStrategyPool()
   const [cardSize, setCardSize] = useState<CardSize>(loadCardSize)
   // 日k蜡烛图显示开关（仅当 candle 列可见时才有意义；持久化）
   const [dailyKChartVisible, setDailyKChartVisible] = useState<boolean>(() => storage.screenerCandle.get(true))
@@ -143,6 +143,14 @@ export function Screener() {
 
   const availableStrategyIds = useMemo(() => new Set((strategies.data?.presets ?? []).map(s => s.id)), [strategies.data])
   const visiblePool = useMemo(() => pool.filter(id => availableStrategyIds.has(id)), [pool, availableStrategyIds])
+
+  // 策略列表加载后,自动清除池中失效的自定义策略(如本地开发残留的、
+  // 当前后端已不存在的策略 ID),避免"策略池"对话框持续显示失效项。
+  // availableStrategyIds 初始为空集合时跳过,防止首次渲染误清整个池。
+  useEffect(() => {
+    if (availableStrategyIds.size === 0) return
+    prune(availableStrategyIds)
+  }, [availableStrategyIds, prune])
 
   // 进入页面自动跑策略池中的策略，获取命中数
   const runAll = useMutation({

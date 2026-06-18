@@ -4,6 +4,7 @@ import { motion, AnimatePresence } from 'framer-motion'
 import { Wifi, Play, Loader2, X, Check, Crown } from 'lucide-react'
 import { api, type EndpointItem } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
+import { EXPERT_RANK, tierRank } from '@/lib/capability-labels'
 
 interface EpResult {
   ok: boolean
@@ -15,7 +16,7 @@ interface EpResult {
   error?: string
 }
 
-export function EndpointTestDialog({ hasKey, currentEndpoint, onClose }: { hasKey: boolean; currentEndpoint: string; onClose: () => void }) {
+export function EndpointTestDialog({ hasKey, tierLabel, currentEndpoint, onClose }: { hasKey: boolean; tierLabel: string; currentEndpoint: string; onClose: () => void }) {
   const qc = useQueryClient()
   const [results, setResults] = useState<Record<string, EpResult | null>>({})
   const [testing, setTesting] = useState<Record<string, boolean>>({})
@@ -52,6 +53,8 @@ export function EndpointTestDialog({ hasKey, currentEndpoint, onClose }: { hasKe
 
   const anyTesting = Object.values(testing).some(Boolean)
   const isFree = !hasKey
+  // 专线端点需 Expert 及以上套餐;Free 模式必然不可用
+  const canUsePremium = !isFree && tierRank(tierLabel) >= EXPERT_RANK
   const currentLabel = endpoints.find(ep => ep.url === currentEndpoint)?.label ?? currentEndpoint
 
   async function applyEndpoint(url: string) {
@@ -137,7 +140,7 @@ export function EndpointTestDialog({ hasKey, currentEndpoint, onClose }: { hasKe
               <div className="py-10 text-center text-xs text-muted">未能加载端点列表</div>
             ) : (
               endpoints.map(ep => (
-                <EpRow key={ep.url} ep={ep} result={results[ep.url]} testing={testing[ep.url]} isCurrent={ep.url === currentEndpoint} isFree={isFree} switching={switching} onApply={applyEndpoint} />
+                <EpRow key={ep.url} ep={ep} result={results[ep.url]} testing={testing[ep.url]} isCurrent={ep.url === currentEndpoint} isFree={isFree} canUsePremium={canUsePremium} switching={switching} onApply={applyEndpoint} />
               ))
             )}
           </div>
@@ -151,12 +154,13 @@ export function EndpointTestDialog({ hasKey, currentEndpoint, onClose }: { hasKe
   )
 }
 
-function EpRow({ ep, result, testing, isCurrent, isFree, switching, onApply }: {
+function EpRow({ ep, result, testing, isCurrent, isFree, canUsePremium, switching, onApply }: {
   ep: EndpointItem
   result: EpResult | null
   testing?: boolean
   isCurrent?: boolean
   isFree?: boolean
+  canUsePremium?: boolean
   switching: string | null
   onApply: (url: string) => void
 }) {
@@ -234,9 +238,9 @@ function EpRow({ ep, result, testing, isCurrent, isFree, switching, onApply }: {
         </div>
       </div>
 
-      {/* 应用按钮区域 —— Free 模式不可用任何付费端点 */}
-      {isFree ? null : isPremium ? (
-        // 专线端点:需 Expert 及以上套餐权限,不可应用
+      {/* 应用按钮区域 —— Free 模式不可用任何付费端点；专线端点需 Expert+ */}
+      {isFree ? null : (isPremium && !canUsePremium) ? (
+        // 专线端点:需 Expert 及以上套餐权限,当前套餐不足,不可应用
         <span
           className="shrink-0 inline-flex items-center gap-1 px-2 py-1 rounded-btn text-[11px] font-medium bg-warning/10 text-warning/70 cursor-not-allowed select-none mt-0.5"
           title="需要 Expert 及以上套餐的专线加速权限"
