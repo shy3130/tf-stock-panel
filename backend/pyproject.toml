@@ -1,6 +1,6 @@
 [project]
 name = "tf-stocks-panel-backend"
-version = "0.1.20"
+version = "0.1.21"
 description = "A 股选股 + 监控 + 回测面板 — TickFlow 适配"
 readme = "../README.md"
 requires-python = ">=3.11"

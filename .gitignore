@@ -45,6 +45,12 @@ backend/data/**
 !backend/data/.gitkeep
 data/**
 !data/.gitkeep
+# 扩展数据: 只跟踪 config.json(表结构), 不跟踪数据文件(parquet/csv)
+!data/ext_data/
+!data/ext_data/**
+!data/ext_data/**/config.json
+data/ext_data/**/*.parquet
+data/ext_data/**/*.csv
 
 # ===== Secrets =====
 .env

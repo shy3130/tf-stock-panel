@@ -1,0 +1,44 @@
+{
+  "id": "ext_hy_ths",
+  "label": "扩展行业",
+  "mode": "snapshot",
+  "fields": [
+    {
+      "name": "symbol",
+      "dtype": "string",
+      "label": "标的代码"
+    },
+    {
+      "name": "code",
+      "dtype": "string",
+      "label": "代码"
+    },
+    {
+      "name": "股票代码",
+      "dtype": "string",
+      "label": "股票代码"
+    },
+    {
+      "name": "股票简称",
+      "dtype": "string",
+      "label": "股票简称"
+    },
+    {
+      "name": "所属同花顺行业",
+      "dtype": "string",
+      "label": "所属行业"
+    }
+  ],
+  "description": "ths行业、月更",
+  "symbol_map": {
+    "type": "mapped",
+    "col": "股票代码"
+  },
+  "code_map": {
+    "type": "computed",
+    "from": "symbol",
+    "method": "strip_exchange"
+  },
+  "created_at": "2026-06-19T19:57:17.004819",
+  "updated_at": "2026-06-19T19:57:17.004819"
+}
