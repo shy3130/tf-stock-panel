@@ -1,4 +1,4 @@
-import { useEffect } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { NavLink, Outlet, useNavigate } from 'react-router-dom'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { motion } from 'framer-motion'
@@ -26,6 +26,7 @@ import {
   Key,
   Database,
   Timer,
+  Loader2,
   LayoutDashboard,
   Tags,
   TrendingUp,
@@ -36,6 +37,7 @@ import {
   Landmark,
   Cable,
   RadioTower,
+  CheckCircle2,
 } from 'lucide-react'
 import { Logo } from './Logo'
 import { api, type IndexQuote } from '@/lib/api'
@@ -258,6 +260,30 @@ export function Layout() {
     queryFn: api.analysisMenus,
   })
 
+  // 数据同步状态轮询: 有活跃 job 时「数据」菜单项显示转圈
+  const { data: pipelineJobs } = useQuery({
+    queryKey: QK.pipelineJobs,
+    queryFn: () => api.pipelineJobs(1),
+    refetchInterval: (query) => (query.state.data?.active_id ? 2000 : 15000),
+    refetchIntervalInBackground: true,
+  })
+  const isDataSyncing = !!pipelineJobs?.active_id
+
+  // 数据同步完成的"瞬时反馈": isDataSyncing 从 true→false 时显示绿色对勾,
+  // 闪烁约 3 秒后自动消失。
+  const [dataSyncJustDone, setDataSyncJustDone] = useState(false)
+  const prevSyncingRef = useRef(false)
+  useEffect(() => {
+    // 仅在"刚结束"(true→false)且非首次挂载时触发
+    if (prevSyncingRef.current && !isDataSyncing) {
+      setDataSyncJustDone(true)
+      const t = setTimeout(() => setDataSyncJustDone(false), 3000)
+      prevSyncingRef.current = isDataSyncing
+      return () => clearTimeout(t)
+    }
+    prevSyncingRef.current = isDataSyncing
+  }, [isDataSyncing])
+
   const qc = useQueryClient()
   const navigate = useNavigate()
   const version = versionData?.version
@@ -392,6 +418,13 @@ export function Layout() {
                 <>
                   <Icon className="h-4 w-4 shrink-0" />
                   <span className="flex-1">{label}</span>
+                  {/* 数据同步状态: 同步中转圈, 刚完成显示绿色对勾闪烁 3 秒 */}
+                  {to === '/data' && isDataSyncing && (
+                    <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin text-accent" />
+                  )}
+                  {to === '/data' && !isDataSyncing && dataSyncJustDone && (
+                    <CheckCircle2 className="h-3.5 w-3.5 shrink-0 text-bull animate-pulse" />
+                  )}
                   {/* 监控中心徽标: 仅非监控页且有未读时显示 */}
                   {to === '/monitor' && <MonitorBadge active={isActive} />}
                 </>
