@@ -109,7 +109,12 @@ def get_cash_flow(request: Request, symbol: str | None = None):
 
 @router.post("/sync/{table}")
 def sync_table(request: Request, table: str):
-    """手动触发同步。table: metrics / income / balance_sheet / cash_flow / all"""
+    """手动触发同步(立即返回,后台异步执行)。
+
+    table: metrics / income / balance_sheet / cash_flow / all
+    同步在后台线程执行,全量同步需数分钟。本接口立即返回 started 状态,
+    前端通过轮询 GET /status 的 syncing 字段观察进度。
+    """
     capset = request.app.state.capabilities
     capset.require(Cap.FINANCIAL)
 
@@ -122,6 +127,6 @@ def sync_table(request: Request, table: str):
         return {"status": "error", "message": "FinancialScheduler not available"}
 
     target = None if table == "all" else table
-    result = fs.run_now(target)
+    result = fs.trigger(target)
 
     return {"status": "ok", "synced": result}

@@ -1,4 +1,4 @@
-import { useState, useRef } from 'react'
+import { useState, useEffect } from 'react'
 import { RefreshCw, Lock, Loader2, X, Search, FileText, Database, Clock, CheckCircle2, Hourglass } from 'lucide-react'
 import { PageHeader } from '@/components/PageHeader'
 import { EmptyState } from '@/components/EmptyState'
@@ -7,6 +7,7 @@ import { useFinancialStatus, useFinancialSync } from '@/lib/useFinancials'
 import { StockFinancialSearch } from '@/components/financials/StockFinancialSearch'
 import { StockFinancialDetail } from '@/components/financials/StockFinancialDetail'
 import { fmtBigNum } from '@/lib/format'
+import { toast } from '@/components/Toast'
 
 const TABLE_LABELS: Record<string, string> = {
   metrics: '核心指标',
@@ -27,13 +28,24 @@ export function Financials() {
   const hasFinancial = caps?.capabilities?.['financial'] != null
   const { data: status, isLoading } = useFinancialStatus()
   const syncMut = useFinancialSync()
-  // 同步状态: 服务端 syncing 真值优先, 兜底本地 mutation pending
+  // 同步进行中 = 服务端真值(status.syncing)或本地乐观态(请求已发出待确认)。
+  // 乐观窗口:点击后到 invalidate 触发的 refetch 返回之间,status.syncing 暂为 false,
+  // 用 syncMut.isPending 覆盖,让按钮立即置灰、避免重复点击。
+  // 后端 trigger() 返回时 syncing 已为 true,refetch 到达后 status.syncing 接管。
   const syncing = (status?.syncing ?? false) || syncMut.isPending
   // 本次同步开始时间戳(ms): 用于判断每张表的 last_sync 是否属于本次同步
   // (后端每张表完成即更新 last_sync, 前端轮询时对比时间戳得到精确进度)
-  const syncStartedAtRef = useRef<number | null>(null)
+  const [syncStartedAt, setSyncStartedAt] = useState<number | null>(null)
   // 单表同步时记录表名 (null = 全量同步), 用于区分卡片状态
-  const syncSingleTableRef = useRef<string | null>(null)
+  const [syncSingleTable, setSyncSingleTable] = useState<string | null>(null)
+  // 同步自然结束(服务端 syncing 由 true→false):清空本次同步记录。
+  // 这是可靠的收尾时机 —— 不依赖 mutation 的 onSettled(它现在瞬间触发,会误清)。
+  useEffect(() => {
+    if (!syncing && syncStartedAt !== null) {
+      setSyncStartedAt(null)
+      setSyncSingleTable(null)
+    }
+  }, [syncing, syncStartedAt])
   // 选中的个股(模糊搜索结果);null 时显示搜索引导
   const [selected, setSelected] = useState<{ symbol: string; name: string } | null>(null)
 
@@ -57,15 +69,27 @@ export function Financials() {
   }
 
   const handleSync = (table: string) => {
-    // 防重复点击:syncing 中不再触发(后端 run_now 也有 is_syncing 兜底)
+    // 防重复点击:syncing 中不再触发(后端 trigger 也有 _is_syncing 兜底)
     if (syncing) return
     // 记录开始时间: 全量同步判断所有 4 张表, 单表同步只判断这一张
-    syncStartedAtRef.current = Date.now()
-    syncSingleTableRef.current = table === 'all' ? null : table
+    setSyncStartedAt(Date.now())
+    setSyncSingleTable(table === 'all' ? null : table)
     syncMut.mutate(table, {
-      onSettled: () => {
-        syncStartedAtRef.current = null
-        syncSingleTableRef.current = null
+      onSuccess: (r) => {
+        // 后端 trigger 立即返回 started 状态;若被防并发跳过(已有同步在进行),
+        // 给用户明确反馈,并清空本次误设的记录。
+        if (!r.synced?.started) {
+          if (r.synced?.reason === 'already running') {
+            toast('财务数据正在同步中,请稍候', 'success')
+          }
+          setSyncStartedAt(null)
+          setSyncSingleTable(null)
+        }
+      },
+      onError: () => {
+        // 请求失败:清空本次记录(request 已弹错误 toast)
+        setSyncStartedAt(null)
+        setSyncSingleTable(null)
       },
     })
   }
@@ -74,8 +98,6 @@ export function Financials() {
   const available = status?.available ?? false
   const lastSync = status?.last_sync ?? {}
   // 本次同步进度: 仅当 syncStartedAt 存在且 syncing 时, 按 last_sync 时间戳判断
-  const syncStartedAt = syncStartedAtRef.current
-  const syncSingleTable = syncSingleTableRef.current
   const isFullSync = syncing && syncStartedAt && !syncSingleTable  // 全量同步
   const isSingleSync = syncing && syncStartedAt && !!syncSingleTable  // 单表同步
   const TABLE_ORDER = ['metrics', 'income', 'balance_sheet', 'cash_flow'] as const

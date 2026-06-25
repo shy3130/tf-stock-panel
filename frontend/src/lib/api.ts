@@ -1166,8 +1166,9 @@ export const api = {
       `/api/financials/cash-flow${symbol ? `?symbol=${encodeURIComponent(symbol)}` : ''}`,
     ),
 
+  /** 触发财务数据同步(后台异步执行,接口立即返回 started 状态) */
   financialSync: (table: string) =>
-    request<{ status: string; synced: Record<string, number> }>(
+    request<{ status: string; synced: { started: boolean; reason?: string } }>(
       `/api/financials/sync/${table}`, { method: 'POST' },
     ),
 

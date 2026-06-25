@@ -243,8 +243,39 @@ class FinancialScheduler:
         except asyncio.CancelledError:
             pass
 
+    def _run_body(self, table: str | None) -> dict[str, int]:
+        """同步逻辑本体(不加锁,假设调用方已持有 _is_syncing)。
+
+        table=None 同步全部 4 张表;否则只同步指定表。
+        每张表完成立即更新 last_sync,让前端轮询 /status 能看到进度递增。
+        """
+        if table:
+            fn = {
+                "metrics": sync_metrics,
+                "income": sync_income,
+                "balance_sheet": sync_balance_sheet,
+                "cash_flow": sync_cash_flow,
+            }.get(table)
+            if not fn:
+                return {}
+            rows = fn(self._data_dir, self._capset)
+            self._last_sync[table] = datetime.now(timezone.utc).isoformat()
+            return {table: rows}
+        # 全部同步
+        symbols = _get_symbols(self._data_dir)
+        result: dict[str, int] = {}
+        for t in FINANCIAL_TABLES:
+            result[t] = _sync_table(t, symbols, self._data_dir, self._capset, latest_only=True)
+            self._last_sync[t] = datetime.now(timezone.utc).isoformat()
+        _refresh_financials_views(self._data_dir)
+        return result
+
     def run_now(self, table: str | None = None) -> dict[str, int]:
-        """手动触发同步。table=None 同步全部。
+        """同步执行一次同步(阻塞调用线程)。
+
+        ⚠ 全量同步需数分钟,务必在后台线程调用,不要直接在 HTTP 请求线程里阻塞,
+        否则请求会长时间 pending 直至被浏览器/代理超时掐断(表现为"点击无反应")。
+        HTTP 接口应调用 trigger() 立即返回,再让前端轮询 /status.syncing 看进度。
 
         用 _is_syncing 标志防并发:若已有同步在进行,本次直接跳过,
         避免重复请求拖慢服务端 / 触发上游限流。
@@ -257,31 +288,45 @@ class FinancialScheduler:
                 return {"_skipped": 1}
             self._is_syncing = True
         try:
-            if table:
-                fn = {
-                    "metrics": sync_metrics,
-                    "income": sync_income,
-                    "balance_sheet": sync_balance_sheet,
-                    "cash_flow": sync_cash_flow,
-                }.get(table)
-                if not fn:
-                    return {}
-                rows = fn(self._data_dir, self._capset)
-                self._last_sync[table] = datetime.now(timezone.utc).isoformat()
-                return {table: rows}
-            else:
-                # 全部同步: 逐表执行, 每张完成立即更新 last_sync,
-                # 让前端轮询 /status 能看到进度递增 (而非等全部完成才一次性更新)。
-                symbols = _get_symbols(self._data_dir)
-                result: dict[str, int] = {}
-                for t in FINANCIAL_TABLES:
-                    result[t] = _sync_table(t, symbols, self._data_dir, self._capset, latest_only=True)
-                    self._last_sync[t] = datetime.now(timezone.utc).isoformat()
-                _refresh_financials_views(self._data_dir)
-                return result
+            return self._run_body(table)
         finally:
             with self._lock:
                 self._is_syncing = False
+
+    def trigger(self, table: str | None = None) -> dict[str, int]:
+        """触发一次同步(非阻塞,立即返回)。
+
+        在后台线程执行同步体,HTTP 请求无需等待。
+        返回 {"started": True/False}:
+          - False = 能力不足或已有同步在进行(被防并发跳过)
+          - True  = 已在后台开始,前端应轮询 /status.syncing 观察进度
+
+        ⚠ _is_syncing 在此处置 True(持锁),确保 trigger 返回时前端轮询
+        /status 已能看到 syncing=True,无竞态窗口;同时防止快速重复点击
+        启动多个后台线程。后台线程复用 _run_body 执行真正的同步逻辑。
+        """
+        if not self._capset or not self._capset.has(Cap.FINANCIAL):
+            return {"started": False, "reason": "no FINANCIAL capability"}
+        with self._lock:
+            if self._is_syncing:
+                logger.info("financial sync trigger skipped: already running")
+                return {"started": False, "reason": "already running"}
+            # 持锁置位:保证 trigger 返回前 syncing 已为 True
+            self._is_syncing = True
+
+        def _bg() -> None:
+            try:
+                self._run_body(table)
+            except Exception as e:  # noqa: BLE001
+                logger.exception("background financial sync failed: %s", e)
+            finally:
+                with self._lock:
+                    self._is_syncing = False
+
+        t = threading.Thread(target=_bg, name="financial-sync", daemon=True)
+        t.start()
+        logger.info("financial sync triggered in background: table=%s", table or "all")
+        return {"started": True}
 
     @property
     def is_syncing(self) -> bool:
