@@ -10,14 +10,17 @@
 [![Data: TickFlow](https://img.shields.io/badge/Data-TickFlow-00b386.svg)](https://tickflow.org/auth/register?ref=V3KDKGXPEA)
 [![Deploy: Docker](https://img.shields.io/badge/Deploy-Docker-2496ed.svg)](./Dockerfile)
 
-基于 [TickFlow](https://tickflow.org/auth/register?ref=V3KDKGXPEA) 数据 · 🚀 **开箱即用**(单容器 / Free 模式无需 Key)
+基于 [TickFlow](https://tickflow.org/auth/register?ref=V3KDKGXPEA) 数据 · 🚀 **开箱即用**(单容器 / Free 模式)
 能力驱动,适配 Free → Expert 全档位订阅 · 🔌 **自由接入第三方扩展数据**(例如 Tushare、自有量化项目数据)
 
 **[核心功能](#-核心功能)** · **[快速开始](#-快速开始)** · **[配置](#️-配置)** · **[路线图](#-路线图)**
 
 </div>
 
-> **⚠️说明**:目前项目基于[TickFlow](https://tickflow.org/auth/register?ref=V3KDKGXPEA)数据源。自有数据源需二次开发修改字段映射即可;后续需求人多的话可能会实现切换数据源功能.
+> **⚠️说明**:目前项目基于[TickFlow](https://tickflow.org/auth/register?ref=V3KDKGXPEA)数据源。无需付费即可使用策略+回测等功能.自有个性化数据源可接入扩展数据使用。
+
+ 如果觉得有用,请Star支持一下,蟹蟹🌹
+
 
 ---
 
@@ -31,8 +34,8 @@
 
 | 配置项 | 说明 | 是否必填 |
 | :--- | :--- | :--- |
-| **TickFlow API Key** | 数据源凭证,留空启用 Free 模式(无需注册即可体验) | 可选 |
-| **AI 大模型 API Key** | 用于 AI 生成策略、个股分析(开发中)、行情分析(开发中),任意 OpenAI 兼容接口,留空关闭 | 可选 |
+| **TickFlow API Key** | 数据源凭证,留空启用 None 模式 | 可选 |
+| **AI 大模型 API Key** | 用于 AI 生成策略、个股分析(开发中)、行情分析(开发中)等,任意 OpenAI 兼容接口,留空关闭 | 可选 |
 
 <table>
   <tr>
@@ -115,7 +118,7 @@
 
 ### 🧪 回测引擎(Backtest)
 
-基于 vectorbt(全项目**唯一**一处 pandas 出现地):
+基于 vectorbt:
 
 - **三种回测模式**:个股 · 策略组合 · 自由信号组合
 - **真实约束**:T+1 · 手续费 · 滑点(基点) · 止损 · 最大持仓天数
@@ -164,7 +167,24 @@
 | [`uv`](https://docs.astral.sh/uv/) | latest | `curl -LsSf https://astral.sh/uv/install.sh \| sh` |
 | `pnpm` | 9 | `npm i -g pnpm` 或 `corepack enable && corepack prepare pnpm@9 --activate` |
 
-### 方式 A:Docker(最省心,生产推荐)
+
+
+### 方式 A:Dev 模式(二次开发,最推荐)
+
+```bash
+cp .env.example .env       # 填 TICKFLOW_API_KEY,留空则启用 Free 试用
+```
+
+**一键启动**(推荐,自动检查\下载依赖 / 释放端口 / 同时起前后端,Ctrl-C 一并关闭):
+
+| 平台 | 命令 |
+| :--- | :--- |
+| **macOS / Linux** | `./dev.sh` |
+| **Windows (PowerShell)** | `.\dev.ps1` |
+
+
+
+### 方式 B:Docker(最省心,可部署)
 
 ```bash
 cp .env.example .env       # 按需填写 Key(留空即 Free 模式,可直接体验)
@@ -172,36 +192,6 @@ docker compose up --build
 # 打开 http://localhost:3018
 ```
 
-### 方式 B:桌面客户端(免环境,开箱即用)
-
-下载对应平台的安装包,运行后按向导安装即可,**无需 Python / Node 环境**。
-
-| 平台 | 文件 |
-| :--- | :--- |
-| **Windows** | `TickFlowStockPanel-Setup-x64.exe` → 双击安装向导,自动创建桌面/开始菜单快捷方式 |
-| **macOS (Apple Silicon)** | `TickFlowStockPanel-macos-arm64.dmg` → 双击打开,拖入「应用程序」(M1/M2/M3/M4 芯片选这个) |
-| **macOS (Intel)** | `TickFlowStockPanel-macos-x64.dmg` → 双击打开,拖入「应用程序」(老款 Intel 芯片选这个) |
-| **Linux** | `TickFlowStockPanel-linux-x64.tar.gz` → 解压后运行可执行文件 |
-
-下载地址:**[GitHub Releases](https://github.com/shy3130/tickflow-stock-panel/releases/latest)**
-
-> - 桌面版数据存储在用户目录(Windows `%APPDATA%`、macOS `~/Library/Application Support`、Linux `~/.local/share`),卸载重装数据不丢失。
-> - 桌面版**不含 vectorbt 回测引擎**(为控制体积);纯 Polars 回测引擎照常可用。
-> - 支持系统通知:在「设置 → 实时监控 → 系统通知」开启,监控告警会推送到操作系统通知中心。
-> - 版本更新:在「设置 → 系统设置 → 关于」点「检查更新」跳转 Release 页下载新版。
-
-### 方式 C:Dev 模式(二次开发)
-
-```bash
-cp .env.example .env       # 填 TICKFLOW_API_KEY,留空则启用 Free 试用
-```
-
-**一键启动**(推荐,自动检查依赖 / 释放端口 / 同时起前后端,Ctrl-C 一并关闭):
-
-| 平台 | 命令 |
-| :--- | :--- |
-| **macOS / Linux** | `./dev.sh` |
-| **Windows (PowerShell)** | `.\dev.ps1` |
 
 首次运行会自动安装前后端依赖(约 1-2 分钟),之后直接启动:
 
