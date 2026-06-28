@@ -5,6 +5,7 @@ from datetime import date
 from app.services.tushare_import import (
     _normalize_tushare_basic_frame,
     _normalize_tushare_daily_frame,
+    _normalize_tushare_index_daily_frame,
 )
 
 
@@ -83,3 +84,25 @@ def test_tushare_basic_units_match_tickflow_instruments():
     assert row["float_market_cap"] == 199000002500.0
     assert row["pe_ttm"] == 5.6
     assert row["pb"] == 0.7
+
+
+def test_tushare_index_daily_normalizes_to_index_storage_schema():
+    df = _normalize_tushare_index_daily_frame([
+        {
+            "ts_code": "000001.SH",
+            "trade_date": "20260626",
+            "open": "3080.0",
+            "high": "3090.0",
+            "low": "3070.0",
+            "close": "3085.0",
+            "vol": "1000000",
+            "amount": "123456.7",
+        }
+    ])
+
+    assert df.columns == ["symbol", "date", "open", "high", "low", "close", "volume", "amount"]
+    row = df.row(0, named=True)
+    assert row["symbol"] == "000001.SH"
+    assert row["date"] == date(2026, 6, 26)
+    assert row["volume"] == 1000000.0
+    assert row["amount"] == 123456700.0

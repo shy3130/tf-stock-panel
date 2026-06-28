@@ -7,6 +7,7 @@ from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Query, Request
 
+from app import secrets_store
 from app.indicators.pipeline import compute_enriched_single
 from app.services import kline_sync
 
@@ -391,8 +392,18 @@ def sync_symbol(
     """手动触发单股同步(Free 用户在 K 线页用)。"""
     repo = request.app.state.repo
     capset = request.app.state.capabilities
+    from app.tickflow.capabilities import Cap
+    if capset.has(Cap.KLINE_DAILY_BATCH):
+        n = kline_sync.sync_and_persist_daily_batch([symbol], repo, capset, count=days)
+        return {"symbol": symbol, "rows_written": n, "source": "tickflow"}
+    if secrets_store.get_tushare_token():
+        from app.services.tushare_import import import_tushare_daily_symbols
+        end = date.today()
+        start = end - timedelta(days=days)
+        result = import_tushare_daily_symbols(repo, [symbol], start_date=start, end_date=end)
+        return {"symbol": symbol, "rows_written": result.get("rows_written", 0), "source": "tushare"}
     n = kline_sync.sync_and_persist_daily_batch([symbol], repo, capset, count=days)
-    return {"symbol": symbol, "rows_written": n}
+    return {"symbol": symbol, "rows_written": n, "source": "tickflow"}
 
 
 @router.post("/sync_batch")
@@ -403,8 +414,18 @@ def sync_batch(
 ):
     repo = request.app.state.repo
     capset = request.app.state.capabilities
+    from app.tickflow.capabilities import Cap
+    if capset.has(Cap.KLINE_DAILY_BATCH):
+        n = kline_sync.sync_and_persist_daily_batch(symbols, repo, capset, count=days)
+        return {"symbols": symbols, "rows_written": n, "source": "tickflow"}
+    if secrets_store.get_tushare_token():
+        from app.services.tushare_import import import_tushare_daily_symbols
+        end = date.today()
+        start = end - timedelta(days=days)
+        result = import_tushare_daily_symbols(repo, symbols, start_date=start, end_date=end)
+        return {"symbols": symbols, "rows_written": result.get("rows_written", 0), "source": "tushare"}
     n = kline_sync.sync_and_persist_daily_batch(symbols, repo, capset, count=days)
-    return {"symbols": symbols, "rows_written": n}
+    return {"symbols": symbols, "rows_written": n, "source": "tickflow"}
 
 
 @router.post("/refresh_views")
@@ -423,14 +444,15 @@ async def sync_minute(request: Request):
 
     from app.services.pipeline_jobs import job_store
     from app.api.data import invalidate_storage_cache
-    from app.services.preferences import get_minute_sync_days
+    from app.services.preferences import get_minute_sync_days, get_minute_sync_source
     from app.tickflow.capabilities import Cap
     from app.tickflow.pools import get_pool
 
     repo = request.app.state.repo
     capset = request.app.state.capabilities
 
-    if not capset.has(Cap.KLINE_MINUTE_BATCH):
+    source = get_minute_sync_source()
+    if source != "local_quant" and not capset.has(Cap.KLINE_MINUTE_BATCH):
         raise HTTPException(status_code=403, detail="需要 Pro+ 权限")
 
     job_id = job_store.create()
@@ -446,6 +468,26 @@ async def sync_minute(request: Request):
             job_store.progress(job_id, stage, pct, msg)
 
         try:
+            if source == "local_quant":
+                progress("sync_minute", 10, "从本地 Tushare 导入分钟K…")
+                from app.services.local_quant_import import import_local_quant_minute
+
+                days = get_minute_sync_days()
+
+                def _run_local():
+                    return import_local_quant_minute(repo, days=days)
+
+                result = await loop.run_in_executor(_long_task_executor, _run_local)
+                written = int(result.get("rows_written") or 0)
+                universe_size = int(result.get("symbols") or 0)
+                from app.jobs.daily_pipeline import _refresh_single_view
+                _refresh_single_view(repo, "kline_minute")
+
+                progress("done", 100, f"分钟 K 同步完成,{written} 行")
+                job_store.succeed(job_id, {"minute_rows": written, "universe_size": universe_size, "source": source})
+                invalidate_storage_cache()
+                return
+
             progress("sync_minute", 5, "解析标的池…")
             universe = sorted(set(get_pool("watchlist")) | set(get_pool("CN_Equity_A")))
             # 补充 instruments 全量标的，覆盖北交所、新股等
@@ -471,7 +513,7 @@ async def sync_minute(request: Request):
             _refresh_single_view(repo, "kline_minute")
 
             progress("done", 100, f"分钟 K 同步完成,{written} 行")
-            job_store.succeed(job_id, {"minute_rows": written, "universe_size": len(universe)})
+            job_store.succeed(job_id, {"minute_rows": written, "universe_size": len(universe), "source": source})
             invalidate_storage_cache()
         except Exception as e:  # noqa: BLE001
             job_store.fail(job_id, str(e))
@@ -503,8 +545,9 @@ async def extend_history(request: Request):
         capset = request.app.state.capabilities
 
         from app.tickflow.capabilities import Cap
-        if not capset.has(Cap.KLINE_DAILY_BATCH):
-            raise HTTPException(status_code=403, detail="需要 Pro+ 权限 (batch K-line)")
+        use_tushare = not capset.has(Cap.KLINE_DAILY_BATCH) and bool(secrets_store.get_tushare_token())
+        if not capset.has(Cap.KLINE_DAILY_BATCH) and not use_tushare:
+            raise HTTPException(status_code=403, detail="需要 TickFlow 批量日K权限或 Tushare Token")
 
         from app.services.extend_history import run_extend_history
         from app.services.pipeline_jobs import job_store
@@ -525,10 +568,32 @@ async def extend_history(request: Request):
                                    stage_pct=stage_pct, skip_log=skip_log)
 
             try:
-                result = await loop.run_in_executor(
-                    _long_task_executor,
-                    lambda: run_extend_history(repo, capset, value, unit, on_progress=progress),
-                )
+                if use_tushare:
+                    from app.services.extend_history import compute_offset
+                    from app.services.tushare_import import import_tushare_daily
+                    earliest = repo.earliest_daily_date()
+                    if earliest:
+                        target_start = earliest - compute_offset(value, unit)
+                        target_end = earliest
+                    else:
+                        target_start = date.today() - compute_offset(value, unit)
+                        target_end = date.today()
+                    result = await loop.run_in_executor(
+                        _long_task_executor,
+                        lambda: import_tushare_daily(
+                            repo,
+                            start_date=target_start,
+                            end_date=target_end,
+                            compute_enriched=True,
+                            on_progress=progress,
+                        ),
+                    )
+                    result["source"] = "tushare"
+                else:
+                    result = await loop.run_in_executor(
+                        _long_task_executor,
+                        lambda: run_extend_history(repo, capset, value, unit, on_progress=progress),
+                    )
                 if "error" in result:
                     job_store.fail(job_id, result["error"])
                 else:

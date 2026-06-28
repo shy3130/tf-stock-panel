@@ -18,6 +18,7 @@ import polars as pl
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 
+from app import secrets_store
 from app.indicators.pipeline import run_pipeline
 from app.config import settings
 from app.services import index_sync, instrument_sync, kline_sync
@@ -27,6 +28,7 @@ from app.services.local_quant_import import (
     local_quant_auto_import_enabled,
     upsert_instruments_from_local_quant,
 )
+from app.services.tushare_import import import_tushare_daily, import_tushare_index_daily, upsert_instruments_from_tushare
 from app.tickflow.capabilities import Cap, CapabilitySet
 from app.tickflow.pools import DEMO_SYMBOLS, get_pool
 from app.tickflow.repository import KlineRepository
@@ -82,6 +84,12 @@ def run_instruments_sync(repo: KlineRepository) -> dict:
         _invalidate("instruments")
         return {"instruments_rows": rows, "source": "local_quant"}
 
+    if secrets_store.get_tushare_token():
+        rows = upsert_instruments_from_tushare(repo)
+        _refresh_instruments_view(repo)
+        _invalidate("instruments")
+        return {"instruments_rows": rows, "source": "tushare"}
+
     rows = instrument_sync.sync_instruments(repo.store.data_dir)
     _refresh_instruments_view(repo)
     _invalidate("instruments")
@@ -101,6 +109,7 @@ def run_now(
     emit = on_progress or _noop
     skipped: list[str] = []
     local_quant_enabled = local_quant_auto_import_enabled()
+    tushare_enabled = bool(secrets_store.get_tushare_token())
     inst_source = "tickflow"
 
     # Step 0: 先同步标的维表, 再解析标的池 — 确保标的池基于最新 instruments
@@ -112,6 +121,16 @@ def run_now(
             _refresh_instruments_view(repo)
         except Exception as e:  # noqa: BLE001
             logger.warning("local_quant instruments sync failed, fallback to TickFlow: %s", e)
+            inst_rows = instrument_sync.sync_instruments(repo.store.data_dir)
+            if inst_rows > 0:
+                _refresh_instruments_view(repo)
+    elif tushare_enabled:
+        try:
+            inst_rows = upsert_instruments_from_tushare(repo)
+            inst_source = "tushare"
+            _refresh_instruments_view(repo)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("Tushare instruments sync failed, fallback to TickFlow: %s", e)
             inst_rows = instrument_sync.sync_instruments(repo.store.data_dir)
             if inst_rows > 0:
                 _refresh_instruments_view(repo)
@@ -136,6 +155,7 @@ def run_now(
     today_exists = latest_daily and latest_daily >= today
     new_daily_days = 0
     local_daily_result: dict | None = None
+    tushare_daily_result: dict | None = None
 
     if local_quant_enabled:
         try:
@@ -156,6 +176,27 @@ def run_now(
 
     if local_daily_result is not None:
         pass
+    elif tushare_enabled and not capset.has(Cap.KLINE_DAILY_BATCH):
+        start_date = latest_daily or (today - _td(days=365))
+        emit("sync_daily", 12, f"从 Tushare 导入日K [{start_date} ~ {today}]…")
+        logger.info("sync_daily tushare: [%s ~ %s] start", start_date, today)
+        try:
+            tushare_daily_result = import_tushare_daily(
+                repo,
+                start_date=start_date,
+                end_date=today,
+                compute_enriched=False,
+            )
+            written_daily = int(tushare_daily_result.get("rows_written") or 0)
+            new_daily_days = max((today - start_date).days, 1)
+            _refresh_single_view(repo, "kline_daily")
+            emit("sync_daily", 45, f"Tushare 日K导入完成,{written_daily} 行")
+            logger.info("sync_daily tushare done: %s", tushare_daily_result)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("Tushare daily import failed: %s", e)
+            skipped.append("sync_daily")
+            written_daily = 0
+            new_daily_days = 0
     elif today_exists and capset.has(Cap.QUOTE_POOL):
         # 付费档:今天有数据(QuoteService 已落盘)→ 实时行情覆写,确保最新。
         # free/none 档无 quote.pool 能力,即便今天已有数据(如从 expert 降级),
@@ -363,6 +404,30 @@ def run_now(
         except Exception as e:  # noqa: BLE001
             logger.warning("sync_index failed: %s", e)
             emit("sync_index", 89, f"指数同步失败:{e}")
+    elif tushare_enabled:
+        emit("sync_index", 88, "从 Tushare 同步指数列表与日K…")
+        try:
+            index_dir = repo.store.data_dir / "kline_index_enriched"
+            index_dates = sorted(
+                d.name[5:] for d in index_dir.glob("date=*")
+                if d.is_dir() and d.name.startswith("date=")
+            ) if index_dir.exists() else []
+            index_start = _date.fromisoformat(index_dates[-1]) if index_dates else today - _td(days=365)
+            index_result = import_tushare_index_daily(
+                repo,
+                start_date=index_start,
+                end_date=today,
+            )
+            index_count = int(index_result.get("index_count") or 0)
+            written_index_daily = int(index_result.get("rows_written") or 0)
+            _invalidate("index_instruments")
+            _invalidate("index_daily")
+            _invalidate("index_enriched")
+            emit("sync_index", 89, f"Tushare 指数完成,{index_count} 只指数 {written_index_daily} 行日K")
+        except Exception as e:  # noqa: BLE001
+            skipped.append("sync_index")
+            logger.warning("sync_index tushare failed: %s", e)
+            emit("sync_index", 89, f"Tushare 指数同步失败:{e}")
     else:
         skipped.append("sync_index")
 
@@ -428,9 +493,10 @@ def run_now(
         "index_count": index_count,
         "index_daily_rows": written_index_daily,
         "minute_rows": written_minute,
-        "data_source": "local_quant" if local_daily_result is not None else "tickflow",
+        "data_source": "local_quant" if local_daily_result is not None else ("tushare" if tushare_daily_result is not None else "tickflow"),
         "instrument_source": inst_source,
         "local_quant_daily": local_daily_result,
+        "tushare_daily": tushare_daily_result,
         "local_quant_minute": local_minute_result,
         "skipped_stages": skipped,
     }

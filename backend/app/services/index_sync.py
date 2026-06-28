@@ -63,6 +63,16 @@ def _quotes_to_index_instruments(resp) -> pl.DataFrame:
 
 def sync_index_instruments(repo: KlineRepository) -> int:
     """同步 CN_Index 指数标的维表，返回指数数量。"""
+    from app import secrets_store
+    if secrets_store.get_tushare_token():
+        try:
+            from app.services.tushare_import import upsert_index_instruments_from_tushare
+            count = upsert_index_instruments_from_tushare(repo)
+            if count:
+                return count
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Tushare index instruments fallback failed: %s", exc)
+
     tf = get_client()
     resp = None
     errors: list[str] = []

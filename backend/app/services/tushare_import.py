@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 import logging
 import os
 import time
@@ -13,7 +13,7 @@ import httpx
 import polars as pl
 
 from app import secrets_store
-from app.indicators.pipeline import run_pipeline
+from app.indicators.pipeline import compute_enriched, run_pipeline
 from app.services.local_quant_import import local_quant_minute_status, load_local_quant_settings
 from app.tickflow.repository import KlineRepository
 
@@ -339,6 +339,57 @@ def _normalize_tushare_daily_frame(
     )
 
 
+def _normalize_tushare_index_basic_frame(rows: list[dict[str, Any]]) -> pl.DataFrame:
+    if not rows:
+        return pl.DataFrame()
+    df = pl.DataFrame(rows)
+    if df.is_empty():
+        return df
+    df = df.rename({"ts_code": "symbol"})
+    exprs: list[pl.Expr] = [
+        pl.col("symbol").cast(pl.Utf8, strict=False),
+        pl.lit("index").alias("asset_type"),
+    ]
+    if "code" not in df.columns:
+        exprs.append(pl.col("symbol").str.split(".").list.first().alias("code"))
+    for col in ("name", "market", "publisher", "category", "base_date", "base_point", "list_date"):
+        if col in df.columns:
+            exprs.append(pl.col(col).cast(pl.Utf8, strict=False))
+    normalized = df.with_columns(exprs)
+    keep = ["symbol", "name", "code", "asset_type", "market", "publisher", "category", "base_date", "base_point", "list_date"]
+    return normalized.select([c for c in keep if c in normalized.columns]).drop_nulls(["symbol"])
+
+
+def _normalize_tushare_index_daily_frame(rows: list[dict[str, Any]]) -> pl.DataFrame:
+    if not rows:
+        return pl.DataFrame()
+    df = pl.DataFrame(rows)
+    if df.is_empty():
+        return df
+    df = df.rename({
+        "ts_code": "symbol",
+        "trade_date": "date",
+        "vol": "volume",
+    })
+    # Tushare index_daily.amount is thousand yuan, same as stock daily.amount.
+    df = df.with_columns(
+        pl.col("symbol").cast(pl.Utf8, strict=False),
+        pl.col("date").str.strptime(pl.Date, "%Y%m%d", strict=False),
+        pl.col("open").cast(pl.Float64, strict=False),
+        pl.col("high").cast(pl.Float64, strict=False),
+        pl.col("low").cast(pl.Float64, strict=False),
+        pl.col("close").cast(pl.Float64, strict=False),
+        pl.col("volume").cast(pl.Float64, strict=False),
+        (pl.col("amount").cast(pl.Float64, strict=False) * 1000.0).alias("amount"),
+    )
+    keep = ["symbol", "date", "open", "high", "low", "close", "volume", "amount"]
+    return (
+        df.select(keep)
+        .unique(subset=["symbol", "date"], keep="last")
+        .drop_nulls(["symbol", "date", "open", "high", "low", "close"])
+    )
+
+
 
 def upsert_instruments_from_tushare(repo: KlineRepository) -> int:
     df = fetch_stock_basic()
@@ -400,6 +451,148 @@ def fetch_daily_for_trade_date(trade_date: date) -> pl.DataFrame:
         logger.warning("Tushare daily_basic skipped for %s: %s", ds, exc)
         basic_rows = []
     return _normalize_tushare_daily_frame(daily_rows, basic_rows)
+
+
+def fetch_daily_for_symbol(symbol: str, start_date: date, end_date: date) -> pl.DataFrame:
+    client = _client()
+    params = {
+        "ts_code": symbol,
+        "start_date": start_date.strftime("%Y%m%d"),
+        "end_date": end_date.strftime("%Y%m%d"),
+    }
+    daily_rows = client.call(
+        "daily",
+        params=params,
+        fields="ts_code,trade_date,open,high,low,close,vol,amount",
+    )
+    if not daily_rows:
+        return pl.DataFrame()
+    try:
+        basic_rows = client.call(
+            "daily_basic",
+            params=params,
+            fields="ts_code,trade_date,turnover_rate,total_share,float_share,total_mv,circ_mv,pe_ttm,pb",
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Tushare daily_basic skipped for %s: %s", symbol, exc)
+        basic_rows = []
+    return _normalize_tushare_daily_frame(daily_rows, basic_rows)
+
+
+def import_tushare_daily_symbols(
+    repo: KlineRepository,
+    symbols: list[str],
+    *,
+    start_date: date,
+    end_date: date,
+    compute_enriched: bool = True,
+) -> dict[str, Any]:
+    rows_written = 0
+    unique_symbols = sorted(set(symbols))
+    for symbol in unique_symbols:
+        df = fetch_daily_for_symbol(symbol, start_date, end_date)
+        if df.is_empty():
+            continue
+        repo.append_daily(df)
+        rows_written += df.height
+
+    inst_rows = upsert_instruments_from_tushare(repo)
+    repo.store._register_views()
+    enriched_rows = 0
+    if compute_enriched and rows_written:
+        enriched_rows = run_pipeline(repo.store.data_dir, new_dates_only=True)
+    repo.store._register_views()
+    repo.clear_cache()
+    repo.refresh_cache()
+    return {
+        "status": "ok" if rows_written else "empty",
+        "rows_written": rows_written,
+        "symbols": len(unique_symbols),
+        "start_date": start_date.isoformat(),
+        "end_date": end_date.isoformat(),
+        "instrument_rows": inst_rows,
+        "enriched_rows_written": enriched_rows,
+        "source": "tushare",
+    }
+
+
+def fetch_index_basic() -> pl.DataFrame:
+    frames: list[pl.DataFrame] = []
+    client = _client()
+    fields = "ts_code,name,market,publisher,category,base_date,base_point,list_date"
+    for market in ("SSE", "SZSE", "CSI", "CICC", "SW", "OTH"):
+        try:
+            rows = client.call("index_basic", params={"market": market}, fields=fields)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Tushare index_basic skipped for %s: %s", market, exc)
+            continue
+        df = _normalize_tushare_index_basic_frame(rows)
+        if not df.is_empty():
+            frames.append(df)
+    if not frames:
+        return pl.DataFrame()
+    return pl.concat(frames, how="diagonal_relaxed").unique(subset=["symbol"], keep="last").sort("symbol")
+
+
+def upsert_index_instruments_from_tushare(repo: KlineRepository) -> int:
+    df = fetch_index_basic()
+    if df.is_empty():
+        return 0
+    existing = repo.get_index_instruments()
+    if not existing.is_empty():
+        df = pl.concat([existing, df], how="diagonal_relaxed").unique(subset=["symbol"], keep="last")
+    repo.save_index_instruments(df)
+    repo.refresh_index_views()
+    return df.height
+
+
+def fetch_index_daily_for_symbol(symbol: str, start_date: date, end_date: date) -> pl.DataFrame:
+    rows = _client().call(
+        "index_daily",
+        params={
+            "ts_code": symbol,
+            "start_date": start_date.strftime("%Y%m%d"),
+            "end_date": end_date.strftime("%Y%m%d"),
+        },
+        fields="ts_code,trade_date,open,high,low,close,vol,amount",
+    )
+    return _normalize_tushare_index_daily_frame(rows)
+
+
+def import_tushare_index_daily(
+    repo: KlineRepository,
+    *,
+    start_date: date | datetime | None = None,
+    end_date: date | datetime | None = None,
+    days: int = 365,
+) -> dict[str, Any]:
+    resolved_end_raw = end_date or date.today()
+    resolved_start_raw = start_date or (date.today() - timedelta(days=max(30, min(5000, int(days or 365)))))
+    resolved_end = resolved_end_raw.date() if isinstance(resolved_end_raw, datetime) else resolved_end_raw
+    resolved_start = resolved_start_raw.date() if isinstance(resolved_start_raw, datetime) else resolved_start_raw
+
+    inst_count = upsert_index_instruments_from_tushare(repo)
+    instruments = repo.get_index_instruments()
+    if instruments.is_empty() or "symbol" not in instruments.columns:
+        return {"status": "empty", "index_count": inst_count, "rows_written": 0, "source": "tushare"}
+
+    rows_written = 0
+    for symbol in sorted(set(instruments["symbol"].to_list())):
+        df = fetch_index_daily_for_symbol(symbol, resolved_start, resolved_end)
+        if df.is_empty():
+            continue
+        repo.append_index_daily(df)
+        repo.append_index_enriched(compute_enriched(df, factors=None, instruments=None))
+        rows_written += df.height
+    repo.refresh_index_views()
+    return {
+        "status": "ok" if rows_written else "empty",
+        "index_count": inst_count,
+        "rows_written": rows_written,
+        "start_date": resolved_start.isoformat(),
+        "end_date": resolved_end.isoformat(),
+        "source": "tushare",
+    }
 
 
 def import_tushare_daily(

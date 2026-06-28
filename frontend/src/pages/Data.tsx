@@ -239,7 +239,9 @@ export function Data() {
   const hasAdjCap = !!caps.data?.capabilities?.['adj_factor'] || !!status.data?.adj_factor?.rows
   const hasDailyBatchCap = !!caps.data?.capabilities?.['kline.daily.batch']
   const hasMinuteCap = !!caps.data?.capabilities?.['kline.minute.batch']
-  const pipelineSteps = ['日K', ...(hasAdjCap ? ['复权'] : []), '指标', '指数', ...((hasMinuteCap && minuteAuto) ? ['分钟K'] : [])]
+  const minuteSource = prefs.data?.minute_sync_source ?? 'tickflow'
+  const canRunMinuteStep = minuteAuto && (hasMinuteCap || minuteSource === 'local_quant')
+  const pipelineSteps = ['日K', ...(hasAdjCap ? ['复权'] : []), '指标', '指数', ...(canRunMinuteStep ? ['分钟K'] : [])]
 
   useEffect(() => {
     if (job.data && (job.data.status === 'succeeded' || job.data.status === 'failed')) {
@@ -268,8 +270,8 @@ export function Data() {
   const isStarting = startSync.isPending
   const hasData = !!(s?.instruments?.rows || s?.daily?.rows)
   const hasTushareToken = !!settings.data?.has_tushare_token
-  // none 档(无 key / 无效 key) → 禁用立即同步 (同步依赖付费档的批量端点)
-  const isNoKey = settings.data?.mode === 'none'
+  const canRunMainSync = settings.data?.mode !== 'none' || hasTushareToken
+  const canSyncIndexDaily = hasDailyBatchCap || hasTushareToken
   const indexOverviewStats = s ? {
     rows: 0,
     earliest_date: s.index_daily?.earliest_date ?? s.index_enriched?.earliest_date ?? null,
@@ -352,10 +354,10 @@ export function Data() {
         subtitle="本地数据画像 · 同步状态 · 历史记录"
         right={
           <div className="flex items-center gap-3">
-            {!hasData && !isLoading && !isNoKey && (
+            {!hasData && !isLoading && canRunMainSync && (
               <span className="text-xs text-accent animate-pulse">首次使用请点击右侧按钮同步数据</span>
             )}
-            {isNoKey ? (
+            {!canRunMainSync ? (
               <button
                 disabled
                 className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-btn bg-gradient-to-r from-accent/25 to-accent/10 border border-accent/30 text-accent text-xs font-medium opacity-40 cursor-not-allowed transition-all duration-150"
@@ -408,7 +410,7 @@ export function Data() {
 
       <div className="px-8 py-6 space-y-6 max-w-6xl">
         {/* 未配置 API Key 告警条 —— 引导用户去配置 Key 后才能同步 */}
-        {isNoKey && (
+        {!canRunMainSync && (
           <div className="flex items-center gap-2 rounded-card border border-warning/40 bg-warning/10 px-3 py-2 text-xs">
             <AlertTriangle className="h-4 w-4 shrink-0 text-warning" />
             <span className="text-secondary leading-relaxed">
@@ -1041,7 +1043,7 @@ export function Data() {
                   <div className="flex items-center">
                     <button
                       onClick={() => setIndexExtendValue(v => Math.max(1, v - 1))}
-                      disabled={!hasDailyBatchCap || !!activeJobId || syncIndexDaily.isPending}
+                      disabled={!canSyncIndexDaily || !!activeJobId || syncIndexDaily.isPending}
                       className="h-6 w-6 flex items-center justify-center rounded-l-btn bg-elevated border border-border text-secondary hover:bg-border/50 disabled:opacity-30 transition-colors text-xs"
                     >−</button>
                     <div className="h-6 w-8 flex items-center justify-center border-y border-border text-[11px] font-mono tabular-nums text-foreground bg-base">
@@ -1049,7 +1051,7 @@ export function Data() {
                     </div>
                     <button
                       onClick={() => setIndexExtendValue(v => Math.min(indexExtendUnit === 'year' ? 10 : 36, v + 1))}
-                      disabled={!hasDailyBatchCap || !!activeJobId || syncIndexDaily.isPending}
+                      disabled={!canSyncIndexDaily || !!activeJobId || syncIndexDaily.isPending}
                       className="h-6 w-6 flex items-center justify-center rounded-r-btn bg-elevated border border-border text-secondary hover:bg-border/50 disabled:opacity-30 transition-colors text-xs"
                     >+</button>
                   </div>
@@ -1059,7 +1061,7 @@ export function Data() {
                       <button
                         key={u}
                         onClick={() => { setIndexExtendUnit(u); if (u === 'year' && indexExtendValue > 10) setIndexExtendValue(1); if (u === 'month' && indexExtendValue > 36) setIndexExtendValue(6) }}
-                        disabled={!hasDailyBatchCap || !!activeJobId || syncIndexDaily.isPending}
+                        disabled={!canSyncIndexDaily || !!activeJobId || syncIndexDaily.isPending}
                         className={`px-2 py-0.5 text-[10px] font-medium transition-colors disabled:opacity-40 ${
                           indexExtendUnit === u ? 'bg-accent/15 text-accent' : 'text-secondary hover:bg-elevated'
                         }`}
@@ -1108,7 +1110,7 @@ export function Data() {
                 </div>
                 <button
                   onClick={() => syncIndexDaily.mutate()}
-                  disabled={!hasDailyBatchCap || !!activeJobId || syncIndexDaily.isPending}
+                  disabled={!canSyncIndexDaily || !!activeJobId || syncIndexDaily.isPending}
                   className="w-full inline-flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-btn bg-accent/90 text-base text-xs font-medium hover:bg-accent disabled:opacity-40 disabled:pointer-events-none transition-colors duration-150"
                 >
                   {syncIndexDaily.isPending ? (
@@ -1120,7 +1122,7 @@ export function Data() {
                     <>获取数据</>
                   )}
                 </button>
-                {!hasDailyBatchCap && (
+                {!canSyncIndexDaily && (
                   <span className="text-[10px] text-warning/80 bg-warning/8 rounded px-1.5 py-px font-medium">
                     需 Starter+ / Pro 批量日 K 权限
                   </span>

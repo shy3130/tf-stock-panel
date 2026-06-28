@@ -8,6 +8,7 @@ from typing import Optional
 import polars as pl
 from fastapi import APIRouter, HTTPException, Query, Request
 
+from app import secrets_store
 from app.indicators.pipeline import compute_enriched
 from app.services import index_sync, kline_sync
 from app.tickflow.capabilities import Cap
@@ -89,6 +90,19 @@ def get_index_daily(
 
     capset = request.app.state.capabilities
     if not capset.has(Cap.KLINE_DAILY_BATCH):
+        if secrets_store.get_tushare_token():
+            try:
+                from app.services.tushare_import import fetch_index_daily_for_symbol
+                raw = fetch_index_daily_for_symbol(symbol, start, end)
+                if not raw.is_empty():
+                    repo.append_index_daily(raw)
+                    enriched = compute_enriched(raw, factors=None, instruments=None)
+                    repo.append_index_enriched(enriched)
+                    repo.refresh_index_views()
+                    rows = enriched.filter((pl.col("date") >= start) & (pl.col("date") <= end)).to_dicts()
+                    return {"symbol": symbol, "name": info.get("name"), "index_info": info, "rows": rows, "source": "tushare"}
+            except Exception as e:  # noqa: BLE001
+                raise HTTPException(status_code=502, detail=f"Tushare index fetch failed: {e}") from e
         return {"symbol": symbol, "name": info.get("name"), "index_info": info, "rows": [], "source": "none"}
 
     try:
@@ -141,7 +155,12 @@ def sync_index_daily(
     repo = request.app.state.repo
     capset = request.app.state.capabilities
     if not capset.has(Cap.KLINE_DAILY_BATCH):
-        raise HTTPException(status_code=403, detail="需要 Pro+ 权限 (batch K-line)")
+        if not secrets_store.get_tushare_token():
+            raise HTTPException(status_code=403, detail="需要 TickFlow 批量日K权限或 Tushare Token")
+        count = index_sync.sync_index_instruments(repo)
+        from app.services.tushare_import import import_tushare_index_daily
+        imported = import_tushare_index_daily(repo, days=days)
+        return {"status": "ok", "index_count": count, "rows_written": imported.get("rows_written", 0), "source": "tushare"}
     end = datetime.now()
     start = end - timedelta(days=days)
     count = index_sync.sync_index_instruments(repo)

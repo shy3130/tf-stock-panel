@@ -128,7 +128,13 @@ export function MinuteSyncConfig({ caps, isRunning, onStart }: { caps: { label: 
 
       <div className="pt-2 border-t border-border space-y-2.5">
         <div className="text-[10px] text-secondary">向前扩展历史数据</div>
-        <MinuteExtendControls hasMinuteCap={hasMinuteCap} tierLabel={caps?.label ?? ''} isRunning={isRunning} onStart={onStart} />
+        <MinuteExtendControls
+          canUseSelectedSource={canUseSelectedSource}
+          source={source}
+          tierLabel={caps?.label ?? ''}
+          isRunning={isRunning}
+          onStart={onStart}
+        />
       </div>
 
       <div className="text-[10px] text-muted">
@@ -138,7 +144,13 @@ export function MinuteSyncConfig({ caps, isRunning, onStart }: { caps: { label: 
   )
 }
 
-function MinuteExtendControls({ hasMinuteCap, tierLabel, isRunning, onStart }: { hasMinuteCap: boolean; tierLabel: string; isRunning: boolean; onStart: () => void }) {
+function MinuteExtendControls({ canUseSelectedSource, source, tierLabel, isRunning, onStart }: {
+  canUseSelectedSource: boolean
+  source: 'tickflow' | 'local_quant'
+  tierLabel: string
+  isRunning: boolean
+  onStart: () => void
+}) {
   const qc = useQueryClient()
   // 月单位(按月扩展更长的分钟K历史)仅 Expert+ 开放;Pro 仅可用"天"(1~15 天)
   const canUseMonth = isExpertOrAbove(tierLabel)
@@ -188,7 +200,7 @@ function MinuteExtendControls({ hasMinuteCap, tierLabel, isRunning, onStart }: {
         <div className="flex items-center">
           <button
             onClick={() => setValue(Math.max(1, value - 1))}
-            disabled={!hasMinuteCap || isRunning || extend.isPending}
+            disabled={!canUseSelectedSource || isRunning || extend.isPending}
             className="h-6 w-6 flex items-center justify-center rounded-l-btn bg-elevated border border-border text-secondary hover:bg-border/50 disabled:opacity-30 transition-colors text-xs"
           >−</button>
           <div className="h-6 w-8 flex items-center justify-center border-y border-border text-[11px] font-mono tabular-nums text-foreground bg-base">
@@ -196,7 +208,7 @@ function MinuteExtendControls({ hasMinuteCap, tierLabel, isRunning, onStart }: {
           </div>
           <button
             onClick={() => setValue(Math.min(maxValue, value + 1))}
-            disabled={!hasMinuteCap || isRunning || extend.isPending || value >= maxValue}
+            disabled={!canUseSelectedSource || isRunning || extend.isPending || value >= maxValue}
             className="h-6 w-6 flex items-center justify-center rounded-r-btn bg-elevated border border-border text-secondary hover:bg-border/50 disabled:opacity-30 transition-colors text-xs"
           >+</button>
         </div>
@@ -220,7 +232,7 @@ function MinuteExtendControls({ hasMinuteCap, tierLabel, isRunning, onStart }: {
 
       <button
         onClick={handleFetch}
-        disabled={!hasMinuteCap || isRunning || extend.isPending}
+        disabled={!canUseSelectedSource || isRunning || extend.isPending}
         className="w-full inline-flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-btn bg-accent/90 text-base text-xs font-medium hover:bg-accent disabled:opacity-40 disabled:pointer-events-none transition-colors duration-150"
       >
         {extend.isPending ? (
@@ -252,6 +264,11 @@ function MinuteExtendControls({ hasMinuteCap, tierLabel, isRunning, onStart }: {
             </div>
           </div>
         </div>
+      )}
+      {!canUseSelectedSource && (
+        <span className="text-[10px] text-warning/80 bg-warning/8 rounded px-1.5 py-px font-medium">
+          {source === 'local_quant' ? '本地库无分钟线' : '需 Pro+'}
+        </span>
       )}
     </>
   )
