@@ -28,7 +28,7 @@ from app.services.local_quant_import import (
     local_quant_auto_import_enabled,
     upsert_instruments_from_local_quant,
 )
-from app.services.tushare_import import import_tushare_daily, import_tushare_index_daily, upsert_instruments_from_tushare
+from app.services.tushare_import import import_tushare_adj_factor, import_tushare_daily, import_tushare_index_daily, upsert_instruments_from_tushare
 from app.tickflow.capabilities import Cap, CapabilitySet
 from app.tickflow.pools import DEMO_SYMBOLS, get_pool
 from app.tickflow.repository import KlineRepository
@@ -299,6 +299,31 @@ def run_now(
             emit("sync_adj", 60, "除权因子完成,无新增")
             logger.info("sync_adj: [%s ~ %s] no new factors", adj_start_str, adj_end_str)
         _invalidate("adj_factor")
+    elif tushare_enabled:
+        from datetime import timedelta
+        adj_end_date = today
+        adj_start_date = today - timedelta(days=30)
+        adj_start_str = adj_start_date.strftime("%Y-%m-%d")
+        adj_end_str = adj_end_date.strftime("%Y-%m-%d")
+        emit("sync_adj", 50, f"Tushare 复权因子 [{adj_start_str} ~ {adj_end_str}]…")
+        logger.info("sync_adj tushare: [%s ~ %s] start", adj_start_str, adj_end_str)
+        try:
+            adj_result = import_tushare_adj_factor(
+                repo,
+                universe,
+                start_date=adj_start_date,
+                end_date=adj_end_date,
+            )
+            written_adj = int(adj_result.get("rows_written") or 0)
+            affected_symbols = universe if written_adj else []
+            _refresh_single_view(repo, "adj_factor")
+            _invalidate("adj_factor")
+            emit("sync_adj", 60, f"Tushare 复权因子完成,{written_adj} 行")
+            logger.info("sync_adj tushare done: %s", adj_result)
+        except Exception as e:  # noqa: BLE001
+            skipped.append("sync_adj")
+            emit("sync_adj", 60, f"Tushare 复权因子失败:{e}")
+            logger.warning("Tushare adj_factor sync failed: %s", e)
     else:
         skipped.append("sync_adj")
         logger.info("sync_adj skipped: no ADJ_FACTOR capability")

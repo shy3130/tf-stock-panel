@@ -479,6 +479,137 @@ def fetch_daily_for_symbol(symbol: str, start_date: date, end_date: date) -> pl.
     return _normalize_tushare_daily_frame(daily_rows, basic_rows)
 
 
+def _normalize_tushare_adj_factor_frame(rows: list[dict[str, Any]]) -> pl.DataFrame:
+    if not rows:
+        return pl.DataFrame()
+    df = pl.DataFrame(rows)
+    if df.is_empty():
+        return df
+    df = df.rename({
+        "ts_code": "symbol",
+        "adj_factor": "ex_factor",
+    })
+    df = df.with_columns(
+        pl.col("symbol").cast(pl.Utf8, strict=False),
+        pl.col("trade_date").str.strptime(pl.Date, "%Y%m%d", strict=False),
+        pl.col("ex_factor").cast(pl.Float64, strict=False),
+    )
+    return (
+        df.select(["symbol", "trade_date", "ex_factor"])
+        .drop_nulls(["symbol", "trade_date", "ex_factor"])
+        .filter(pl.col("ex_factor").is_finite() & (pl.col("ex_factor") > 0))
+        .unique(subset=["symbol", "trade_date"], keep="last")
+        .sort(["symbol", "trade_date"])
+    )
+
+
+def fetch_adj_factor_for_symbol(symbol: str, start_date: date, end_date: date) -> pl.DataFrame:
+    rows = _client().call(
+        "adj_factor",
+        params={
+            "ts_code": symbol,
+            "start_date": start_date.strftime("%Y%m%d"),
+            "end_date": end_date.strftime("%Y%m%d"),
+        },
+        fields="ts_code,trade_date,adj_factor",
+    )
+    return _normalize_tushare_adj_factor_frame(rows)
+
+
+def import_tushare_adj_factor(
+    repo: KlineRepository,
+    symbols: list[str] | None = None,
+    *,
+    start_date: date | None = None,
+    end_date: date | None = None,
+    days: int | None = 5000,
+    on_progress: ProgressCb | None = None,
+    should_cancel: Callable[[], bool] | None = None,
+) -> dict[str, Any]:
+    emit = on_progress or (lambda *args, **kwargs: None)
+    cancel_requested = should_cancel or (lambda: False)
+    resolved_end = end_date or date.today()
+    resolved_start = start_date or (
+        resolved_end - timedelta(days=max(1, min(5000, int(days or 5000))) - 1)
+    )
+    if resolved_start > resolved_end:
+        return {"status": "empty", "rows_written": 0, "symbols": 0, "source": "tushare"}
+
+    if symbols is None:
+        inst = repo.get_instruments()
+        if inst.is_empty() or "symbol" not in inst.columns:
+            upsert_instruments_from_tushare(repo)
+            inst = repo.get_instruments()
+        symbols = inst["symbol"].drop_nulls().unique().to_list() if not inst.is_empty() and "symbol" in inst.columns else []
+
+    unique_symbols = sorted(set(str(sym) for sym in symbols if sym))
+    if not unique_symbols:
+        return {"status": "empty", "rows_written": 0, "symbols": 0, "source": "tushare"}
+
+    frames: list[pl.DataFrame] = []
+    for idx, symbol in enumerate(unique_symbols, start=1):
+        if cancel_requested():
+            raise RuntimeError("cancelled")
+        pct = 5 + int(85 * idx / max(len(unique_symbols), 1))
+        emit("tushare_adj_factor", pct, f"Tushare adj_factor {idx}/{len(unique_symbols)} [{symbol}]", stage_pct=int(100 * idx / max(len(unique_symbols), 1)), skip_log=True)
+        try:
+            df = fetch_adj_factor_for_symbol(symbol, resolved_start, resolved_end)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Tushare adj_factor skipped for %s: %s", symbol, exc)
+            continue
+        if not df.is_empty():
+            frames.append(df)
+
+    if not frames:
+        return {
+            "status": "empty",
+            "rows_written": 0,
+            "symbols": len(unique_symbols),
+            "start_date": resolved_start.isoformat(),
+            "end_date": resolved_end.isoformat(),
+            "source": "tushare",
+        }
+
+    new_data = pl.concat(frames, how="diagonal_relaxed")
+    out = repo.store.data_dir / "adj_factor" / "all.parquet"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    if out.exists():
+        existing = pl.read_parquet(out)
+        merged = (
+            pl.concat([existing, new_data], how="diagonal_relaxed")
+            .with_columns(
+                pl.col("symbol").cast(pl.Utf8, strict=False),
+                pl.col("trade_date").cast(pl.Date, strict=False),
+                pl.col("ex_factor").cast(pl.Float64, strict=False),
+            )
+            .drop_nulls(["symbol", "trade_date", "ex_factor"])
+            .unique(subset=["symbol", "trade_date"], keep="last")
+            .sort(["symbol", "trade_date"])
+        )
+        before = existing.height
+        merged.write_parquet(out)
+        rows_written = max(0, merged.height - before)
+        total_rows = merged.height
+    else:
+        new_data.write_parquet(out)
+        rows_written = new_data.height
+        total_rows = new_data.height
+
+    repo.store._register_views()
+    repo.clear_cache()
+    repo.refresh_cache()
+    emit("tushare_adj_factor", 100, "Tushare adj_factor import complete")
+    return {
+        "status": "ok" if total_rows else "empty",
+        "rows_written": rows_written,
+        "total_rows": total_rows,
+        "symbols": len(unique_symbols),
+        "start_date": resolved_start.isoformat(),
+        "end_date": resolved_end.isoformat(),
+        "source": "tushare",
+    }
+
+
 def import_tushare_daily_symbols(
     repo: KlineRepository,
     symbols: list[str],

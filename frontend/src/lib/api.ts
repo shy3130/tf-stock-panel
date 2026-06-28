@@ -1122,6 +1122,11 @@ export const api = {
       method: 'POST',
       body: JSON.stringify(body),
     }),
+  tushareImportAdjFactor: (body?: { start_date?: string | null; end_date?: string | null; days?: number | null }) =>
+    request<{ status: string; rows_written: number; total_rows?: number; symbols?: number; source?: string }>('/api/tushare/import/adj-factor', {
+      method: 'POST',
+      body: JSON.stringify(body ?? {}),
+    }),
 
   testEndpoint: (url: string, rounds?: number) =>
     request<{

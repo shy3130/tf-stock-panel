@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import date
 
 from app.services.tushare_import import (
+    _normalize_tushare_adj_factor_frame,
     _normalize_tushare_basic_frame,
     _normalize_tushare_daily_frame,
     _normalize_tushare_index_daily_frame,
@@ -106,3 +107,18 @@ def test_tushare_index_daily_normalizes_to_index_storage_schema():
     assert row["date"] == date(2026, 6, 26)
     assert row["volume"] == 1000000.0
     assert row["amount"] == 123456700.0
+
+
+def test_tushare_adj_factor_normalizes_to_tickflow_factor_schema():
+    df = _normalize_tushare_adj_factor_frame([
+        {"ts_code": "000001.SZ", "trade_date": "20260626", "adj_factor": "128.1234"},
+        {"ts_code": "000001.SZ", "trade_date": "20260626", "adj_factor": "128.2234"},
+        {"ts_code": "000002.SZ", "trade_date": "20260626", "adj_factor": None},
+    ])
+
+    assert df.columns == ["symbol", "trade_date", "ex_factor"]
+    assert df.height == 1
+    row = df.row(0, named=True)
+    assert row["symbol"] == "000001.SZ"
+    assert row["trade_date"] == date(2026, 6, 26)
+    assert row["ex_factor"] == 128.2234

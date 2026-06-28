@@ -13,7 +13,7 @@ from app import secrets_store
 from app.api.data import invalidate_storage_cache
 from app.services.pipeline_jobs import job_store
 from app.services.ext_pull import pull_scheduler
-from app.services.tushare_import import import_tushare_daily, tushare_status, upsert_instruments_from_tushare
+from app.services.tushare_import import import_tushare_adj_factor, import_tushare_daily, tushare_status, upsert_instruments_from_tushare
 
 router = APIRouter(prefix="/api/tushare", tags=["tushare"])
 logger = logging.getLogger(__name__)
@@ -39,6 +39,12 @@ class ImportDailyRequest(BaseModel):
     end_date: date | None = None
     days: int | None = Field(default=30, ge=1, le=5000)
     compute_enriched: bool = True
+
+
+class ImportAdjFactorRequest(BaseModel):
+    start_date: date | None = None
+    end_date: date | None = None
+    days: int | None = Field(default=5000, ge=1, le=5000)
 
 
 @router.get("/status")
@@ -102,6 +108,21 @@ def import_daily(body: ImportDailyRequest, request: Request) -> dict:
             end_date=body.end_date,
             days=body.days,
             compute_enriched=body.compute_enriched,
+        )
+        invalidate_storage_cache()
+        return result
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@router.post("/import/adj-factor")
+def import_adj_factor(body: ImportAdjFactorRequest, request: Request) -> dict:
+    try:
+        result = import_tushare_adj_factor(
+            request.app.state.repo,
+            start_date=body.start_date,
+            end_date=body.end_date,
+            days=body.days,
         )
         invalidate_storage_cache()
         return result

@@ -173,7 +173,14 @@ export function Data() {
   })
 
   const importAdjFactorLocal = useMutation({
-    mutationFn: api.localQuantImportAdjFactor,
+    mutationFn: () => (
+      hasTushareToken
+        ? api.tushareImportAdjFactor({ days: 5000 }).then(result => ({
+            status: result.status,
+            synced: { adj_factor: result.total_rows ?? result.rows_written ?? 0 },
+          }))
+        : api.localQuantImportAdjFactor()
+    ),
     onSuccess: () => qc.invalidateQueries({ queryKey: QK.dataStatus }),
   })
 
