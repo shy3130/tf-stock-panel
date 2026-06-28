@@ -34,9 +34,16 @@ if (Test-Path $PidFile) {
     $existingPid = (Get-Content $PidFile -ErrorAction SilentlyContinue | Select-Object -First 1)
 }
 
-if ((Test-ProcessAlive $existingPid) -or ((Test-PortListening $BackendPort) -and (Test-PortListening $FrontendPort))) {
+$backendListening = Test-PortListening $BackendPort
+$frontendListening = Test-PortListening $FrontendPort
+
+if ((Test-ProcessAlive $existingPid) -and $backendListening -and $frontendListening) {
     Start-Process $FrontendUrl
     exit 0
+}
+
+if ($existingPid -and (Test-ProcessAlive $existingPid) -and (-not ($backendListening -and $frontendListening))) {
+    Remove-Item $PidFile -Force -ErrorAction SilentlyContinue
 }
 
 $ps = (Get-Command pwsh -ErrorAction SilentlyContinue).Source
