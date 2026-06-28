@@ -204,9 +204,10 @@ def _limit_price(prev: pl.Expr, limit_pct: pl.Expr, up: bool) -> pl.Expr:
     sign = 1 if up else -1
     # limit_pct ∈ {0.05, 0.10, 0.20, 0.30} → 系数分子 105/95、110/90、120/80、130/70
     num = ((1 + sign * limit_pct) * 100).cast(pl.Int64)  # 105, 110, 120, 130 等
-    cents = (prev * 100 + 0.5).floor().cast(pl.Int64)     # 价格转「分」(四舍五入到分)
+    valid_prev = prev.is_not_null() & ~prev.is_nan() & (prev > 0)
+    cents = (prev * 100 + 0.5).floor().cast(pl.Int64, strict=False)  # 价格转「分」(四舍五入到分)
     # cents × num / 100, 四舍五入到分(加 50)
-    return (((cents * num + 50) // 100) / 100)
+    return pl.when(valid_prev).then(((cents * num + 50) // 100) / 100).otherwise(None)
 
 
 def _apply_adj_factor(raw: pl.DataFrame, factors: pl.DataFrame) -> pl.DataFrame:
@@ -228,18 +229,24 @@ def _apply_adj_factor(raw: pl.DataFrame, factors: pl.DataFrame) -> pl.DataFrame:
         pl.col("trade_date").cast(pl.Date, strict=False),
         pl.col("ex_factor").cast(pl.Float64, strict=False),
     ).select("symbol", "trade_date", "ex_factor").drop_nulls()
+    factors = factors.filter(
+        pl.col("ex_factor").is_not_nan()
+        & pl.col("ex_factor").is_finite()
+        & (pl.col("ex_factor") > 0)
+    )
 
     if factors.is_empty():
         return raw
 
+    max_factor = factors.select(pl.col("ex_factor").max()).item()
+    cumulative_factor_mode = bool(max_factor is not None and max_factor > 10)
+
     # 去重 + 排序 + 累积乘积 (一趟完成)
+    base_factors = factors.sort(["symbol", "trade_date"]).unique(subset=["symbol", "trade_date"]).sort(["symbol", "trade_date"])
     factors_sorted = (
-        factors.sort(["symbol", "trade_date"])
-        .unique(subset=["symbol", "trade_date"])
-        .sort(["symbol", "trade_date"])
-        .with_columns(
-            pl.col("ex_factor").cum_prod().over("symbol").alias("cum_factor"),
-        )
+        base_factors.with_columns(pl.col("ex_factor").alias("cum_factor"))
+        if cumulative_factor_mode
+        else base_factors.with_columns(pl.col("ex_factor").cum_prod().over("symbol").alias("cum_factor"))
     )
 
     # 每个 symbol 的总累积因子
